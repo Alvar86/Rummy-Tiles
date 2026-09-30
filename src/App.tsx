@@ -187,6 +187,7 @@ export default function App() {
   }
 
   function startFreshGame(rulesToUse: GameRulesConfig = activeRules) {
+    setActiveRules(rulesToUse);
     const fullPool = createShuffledPool();
     const initialRack = fullPool.slice(0, 14);
     const initialPool = fullPool.slice(14);
