@@ -15,7 +15,7 @@ import './App.css';
 
 const GRID_ROWS = 8;
 const GRID_COLS = 16;
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001';
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://rummy-tiles.onrender.com';
 
 type BoardGrid = (Tile | null)[][];
 
