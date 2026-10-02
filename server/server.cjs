@@ -1,70 +1,66 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const cors = require('cors');
 
 const app = express();
-app.use(cors());
-
 const server = http.createServer(app);
+
 const io = new Server(server, {
   cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
+    origin: '*',
+    methods: ['GET', 'POST'],
+  },
+});
+
+app.get('/', (req, res) => {
+  res.send('Rummy Tiles WebSocket Server is Running!');
 });
 
 const rooms = {};
 
-function generateRoomCode() {
-  return 'ROOM-' + Math.floor(100 + Math.random() * 900);
+function createEmptyGrid() {
+  return Array.from({ length: 8 }, () => Array(16).fill(null));
 }
 
 io.on('connection', (socket) => {
+  console.log('User connected:', socket.id);
+
   socket.on('create_room', ({ playerName }) => {
-    const code = generateRoomCode();
+    const roomCode = `ROOM-${Math.floor(1000 + Math.random() * 9000)}`;
     const newRoom = {
-      code,
+      code: roomCode,
       hostId: socket.id,
-      players: [{ id: socket.id, name: playerName || 'Host' }],
+      players: [{ id: socket.id, name: playerName || 'Player 1' }],
       status: 'LOBBY',
+      currentTurnIndex: 0,
+      grid: createEmptyGrid(),
       rules: {
         initialMeldMode: 'CUMULATIVE_30',
         allowWrapAround: false,
         timerSetting: 'NO_TIMER',
-        jokerSubstitutionMode: 'STRICT_REPLACE'
-      }
+        jokerSubstitutionMode: 'STRICT_REPLACE',
+      },
     };
 
-    rooms[code] = newRoom;
-    socket.join(code);
+    rooms[roomCode] = newRoom;
+    socket.join(roomCode);
     socket.emit('room_created', { room: newRoom });
   });
 
   socket.on('join_room', ({ roomCode, playerName }) => {
-    const cleanCode = roomCode ? roomCode.trim().toUpperCase() : '';
-    const room = rooms[cleanCode];
-
+    const room = rooms[roomCode];
     if (!room) {
       socket.emit('error_message', 'Room not found.');
       return;
     }
-
     if (room.status !== 'LOBBY') {
-      socket.emit('error_message', 'Game has already started in this room.');
-      return;
-    }
-
-    if (room.players.length >= 4) {
-      socket.emit('error_message', 'Room is full.');
+      socket.emit('error_message', 'Game already in progress.');
       return;
     }
 
     room.players.push({ id: socket.id, name: playerName || `Player ${room.players.length + 1}` });
-    socket.join(cleanCode);
-
-    socket.emit('room_created', { room });
-    io.to(cleanCode).emit('room_updated', room);
+    socket.join(roomCode);
+    io.to(roomCode).emit('room_updated', room);
   });
 
   socket.on('update_lobby_settings', ({ roomCode, rules }) => {
@@ -79,35 +75,44 @@ io.on('connection', (socket) => {
     const room = rooms[roomCode];
     if (room && room.hostId === socket.id) {
       room.status = 'IN_GAME';
+      room.currentTurnIndex = 0;
+      room.grid = createEmptyGrid();
       io.to(roomCode).emit('game_started', room);
     }
   });
 
   socket.on('update_board_grid', ({ roomCode, grid }) => {
-    socket.to(roomCode).emit('board_grid_updated', { grid });
-  });
-
-  socket.on('disconnect', () => {
-    for (const code in rooms) {
-      const room = rooms[code];
-      const index = room.players.findIndex(p => p.id === socket.id);
-      if (index !== -1) {
-        room.players.splice(index, 1);
-        if (room.players.length === 0) {
-          delete rooms[code];
-        } else {
-          if (room.hostId === socket.id) {
-            room.hostId = room.players[0].id;
-          }
-          io.to(code).emit('room_updated', room);
-        }
-        break;
+    const room = rooms[roomCode];
+    if (room) {
+      const activePlayer = room.players[room.currentTurnIndex];
+      if (activePlayer && activePlayer.id === socket.id) {
+        room.grid = grid;
+        socket.to(roomCode).emit('board_grid_updated', { grid });
       }
     }
   });
+
+  socket.on('pass_turn', ({ roomCode, grid }) => {
+    const room = rooms[roomCode];
+    if (room) {
+      const activePlayer = room.players[room.currentTurnIndex];
+      if (activePlayer && activePlayer.id === socket.id) {
+        if (grid) room.grid = grid;
+        room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+        io.to(roomCode).emit('turn_changed', {
+          currentTurnIndex: room.currentTurnIndex,
+          grid: room.grid,
+        });
+      }
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log('User disconnected:', socket.id);
+  });
 });
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`Rummy Tiles server running on port ${PORT}`);
+  console.log(`Server listening on port ${PORT}`);
 });

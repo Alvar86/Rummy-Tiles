@@ -31,13 +31,15 @@ interface RoomData {
   players: { id: string; name: string }[];
   status: 'LOBBY' | 'IN_GAME';
   rules: GameRulesConfig;
+  currentTurnIndex: number;
+  grid?: BoardGrid;
 }
 
 function createEmptyGrid(): BoardGrid {
   return Array.from({ length: GRID_ROWS }, () => Array(GRID_COLS).fill(null));
 }
 
-function createShuffledPool(): Tile[] {
+function createShuffledPool(prefix = 'p0'): Tile[] {
   const pool: Tile[] = [];
   let uniqueCounter = 0;
 
@@ -46,7 +48,7 @@ function createShuffledPool(): Tile[] {
       for (let number = 1; number <= 13; number += 1) {
         uniqueCounter += 1;
         pool.push({
-          id: `color-${number}-copy-uid${uniqueCounter}`,
+          id: `${prefix}-color-${number}-copy-uid${uniqueCounter}`,
           number,
           color,
           isJoker: false,
@@ -56,9 +58,9 @@ function createShuffledPool(): Tile[] {
   }
 
   uniqueCounter += 1;
-  pool.push({ id: `joker-0-uid${uniqueCounter}`, number: 1, color: 'black', isJoker: true });
+  pool.push({ id: `${prefix}-joker-0-uid${uniqueCounter}`, number: 1, color: 'black', isJoker: true });
   uniqueCounter += 1;
-  pool.push({ id: `joker-1-uid${uniqueCounter}`, number: 1, color: 'black', isJoker: true });
+  pool.push({ id: `${prefix}-joker-1-uid${uniqueCounter}`, number: 1, color: 'black', isJoker: true });
 
   for (let i = pool.length - 1; i > 0; i -= 1) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -126,6 +128,10 @@ export default function App() {
     boardMelds: [],
   });
 
+  const isSandbox = screen === 'SANDBOX';
+  const activePlayer = room?.players[room?.currentTurnIndex ?? 0];
+  const isMyTurn = isSandbox || (socket && activePlayer && socket.id === activePlayer.id);
+
   // Socket initialization
   useEffect(() => {
     const s = io(SOCKET_URL);
@@ -146,12 +152,24 @@ export default function App() {
 
     s.on('game_started', (roomData: RoomData) => {
       setRoom(roomData);
-      startFreshGame(roomData.rules);
+      const playerIdx = roomData.players.findIndex((p) => p.id === s.id);
+      startFreshGame(roomData.rules, playerIdx >= 0 ? playerIdx : 0);
       setScreen('ONLINE_GAME');
     });
 
     s.on('board_grid_updated', ({ grid }: { grid: BoardGrid }) => {
       setGrid(grid);
+    });
+
+    s.on('turn_changed', ({ currentTurnIndex, grid }: { currentTurnIndex: number; grid: BoardGrid }) => {
+      setRoom((prev) => (prev ? { ...prev, currentTurnIndex } : null));
+      setGrid(grid);
+      setSnapshot((prev) => ({
+        rack: prev.rack,
+        grid: JSON.parse(JSON.stringify(grid)),
+        boardMelds: extractBoardMeldsFromGrid(grid),
+      }));
+      setSelectedId(null);
     });
 
     s.on('error_message', (msg: string) => {
@@ -163,17 +181,28 @@ export default function App() {
     };
   }, []);
 
+  // Update status feedback message when turn changes in Online Game
+  useEffect(() => {
+    if (screen === 'ONLINE_GAME' && room && activePlayer) {
+      if (isMyTurn) {
+        setFeedback('It is your turn! Move tiles or draw a tile to pass.', 'info');
+      } else {
+        setFeedback(`Waiting for ${activePlayer.name}'s turn...`, 'info');
+      }
+    }
+  }, [screen, room?.currentTurnIndex, room?.players, socket?.id]);
+
   // Keybind: Spacebar returns selected tile to rack
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.code === 'Space' && selectedId) {
+      if (event.code === 'Space' && selectedId && isMyTurn) {
         event.preventDefault();
         moveTileToRack(selectedId);
       }
     }
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedId, rack, grid]);
+  }, [selectedId, rack, grid, isMyTurn]);
 
   function notifyActionTaken() {
     if (lastDrawnId) {
@@ -186,9 +215,9 @@ export default function App() {
     setStatusType(type);
   }
 
-  function startFreshGame(rulesToUse: GameRulesConfig = activeRules) {
+  function startFreshGame(rulesToUse: GameRulesConfig = activeRules, playerIndex = 0) {
     setActiveRules(rulesToUse);
-    const fullPool = createShuffledPool();
+    const fullPool = createShuffledPool(`p${playerIndex}`);
     const initialRack = fullPool.slice(0, 14);
     const initialPool = fullPool.slice(14);
     const emptyGrid = createEmptyGrid();
@@ -248,14 +277,21 @@ export default function App() {
   }
 
   function revertTurn() {
+    if (!isMyTurn) return;
     notifyActionTaken();
     setRack(snapshot.rack);
     setGrid(snapshot.grid);
     setSelectedId(null);
+
+    if (socket && room) {
+      socket.emit('update_board_grid', { roomCode: room.code, grid: snapshot.grid });
+    }
+
     setFeedback('Board and rack reset to start of turn snapshot.', 'info');
   }
 
   function drawTileAndPass() {
+    if (!isMyTurn) return;
     notifyActionTaken();
     if (pool.length === 0) {
       setFeedback('Tile pool is empty! Cannot draw more tiles.', 'error');
@@ -296,7 +332,7 @@ export default function App() {
     });
 
     if (socket && room) {
-      socket.emit('update_board_grid', { roomCode: room.code, grid: targetGrid });
+      socket.emit('pass_turn', { roomCode: room.code, grid: targetGrid });
     }
 
     setFeedback(`You drew a tile (${tileLabel(drawnTile)} ${drawnTile.color}). Turn passed.`, 'info');
@@ -316,6 +352,7 @@ export default function App() {
   }
 
   function handleEndTurn() {
+    if (!isMyTurn) return;
     notifyActionTaken();
     const currentMelds = extractBoardMeldsFromGrid(grid);
     const isValid = validateBoard(currentMelds, activeRules);
@@ -347,7 +384,7 @@ export default function App() {
     });
 
     if (socket && room) {
-      socket.emit('update_board_grid', { roomCode: room.code, grid });
+      socket.emit('pass_turn', { roomCode: room.code, grid });
     }
 
     setSelectedId(null);
@@ -355,6 +392,7 @@ export default function App() {
   }
 
   function moveTileToRack(tileId: string, targetRackIndex?: number) {
+    if (!isMyTurn) return;
     notifyActionTaken();
     let tile: Tile | undefined = rack.find((t) => t.id === tileId);
     let fromGridPos: { r: number; c: number } | null = null;
@@ -399,6 +437,7 @@ export default function App() {
   }
 
   function moveTileToGridCell(tileId: string, targetR: number, targetC: number) {
+    if (!isMyTurn) return;
     notifyActionTaken();
     let tile: Tile | undefined = rack.find((t) => t.id === tileId);
     let fromGridPos: { r: number; c: number } | null = null;
@@ -452,11 +491,13 @@ export default function App() {
   }
 
   function onTileClick(tileId: string) {
+    if (!isMyTurn) return;
     notifyActionTaken();
     setSelectedId((current) => (current === tileId ? null : tileId));
   }
 
   function onDragStart(event: DragEvent<HTMLButtonElement>, tileId: string) {
+    if (!isMyTurn) return;
     notifyActionTaken();
     event.dataTransfer.setData('text/plain', tileId);
     event.dataTransfer.effectAllowed = 'move';
@@ -466,6 +507,7 @@ export default function App() {
   function onDropRack(event: DragEvent<HTMLElement>, targetRackIndex?: number) {
     event.preventDefault();
     event.stopPropagation();
+    if (!isMyTurn) return;
     const tileId = event.dataTransfer.getData('text/plain');
     if (tileId) moveTileToRack(tileId, targetRackIndex);
   }
@@ -473,11 +515,13 @@ export default function App() {
   function onDropCell(event: DragEvent<HTMLElement>, r: number, c: number) {
     event.preventDefault();
     event.stopPropagation();
+    if (!isMyTurn) return;
     const tileId = event.dataTransfer.getData('text/plain');
     if (tileId) moveTileToGridCell(tileId, r, c);
   }
 
   function allowDrop(event: DragEvent<HTMLElement>) {
+    if (!isMyTurn) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
   }
@@ -624,8 +668,6 @@ export default function App() {
     );
   }
 
-  const isSandbox = screen === 'SANDBOX';
-
   return (
     <main className="sandbox">
       <header className="sandbox__header">
@@ -636,7 +678,7 @@ export default function App() {
           </button>
         </div>
         <p>
-          Status: <strong>{hasInitialMeld ? 'Initial Meld Complete' : 'Initial Meld Pending (30 pts)'}</strong> | Pool Tiles: <strong>{pool.length}</strong>
+          Status: <strong>{hasInitialMeld ? 'Initial Meld Complete' : 'Initial Meld Pending (30 pts)'}</strong> | Turn: <strong>{isSandbox ? 'Sandbox (Free Play)' : activePlayer?.name}</strong> | Pool Tiles: <strong>{pool.length}</strong>
         </p>
       </header>
 
@@ -729,7 +771,7 @@ export default function App() {
                   onDragOver={allowDrop}
                   onDrop={(event) => onDropCell(event, r, c)}
                   onClick={() => {
-                    if (selectedId) {
+                    if (selectedId && isMyTurn) {
                       moveTileToGridCell(selectedId, r, c);
                     }
                   }}
@@ -739,6 +781,7 @@ export default function App() {
                       tile={cellTile}
                       selected={selectedId === cellTile.id}
                       isDrawn={lastDrawnId === cellTile.id}
+                      disabled={!isMyTurn}
                       onClick={() => onTileClick(cellTile.id)}
                       onDragStart={(event) => onDragStart(event, cellTile.id)}
                       onDragOver={allowDrop}
@@ -753,13 +796,13 @@ export default function App() {
       </section>
 
       <section className="sandbox__actions">
-        <button type="button" className="btn-success" onClick={handleEndTurn}>
+        <button type="button" className="btn-success" disabled={!isMyTurn} onClick={handleEndTurn}>
           End Turn
         </button>
-        <button type="button" className="btn-secondary" onClick={drawTileAndPass}>
+        <button type="button" className="btn-secondary" disabled={!isMyTurn} onClick={drawTileAndPass}>
           Draw Tile & Pass
         </button>
-        <button type="button" className="btn-danger" onClick={revertTurn}>
+        <button type="button" className="btn-danger" disabled={!isMyTurn} onClick={revertTurn}>
           Reset Turn
         </button>
         <button
@@ -807,6 +850,7 @@ export default function App() {
                   tile={tile}
                   selected={selectedId === tile.id}
                   isDrawn={lastDrawnId === tile.id}
+                  disabled={!isMyTurn}
                   onClick={() => onTileClick(tile.id)}
                   onDragStart={(event) => onDragStart(event, tile.id)}
                   onDragOver={allowDrop}
@@ -825,6 +869,7 @@ function TileView({
   tile,
   selected,
   isDrawn,
+  disabled,
   onClick,
   onDragStart,
   onDragOver,
@@ -833,6 +878,7 @@ function TileView({
   tile: Tile;
   selected: boolean;
   isDrawn?: boolean;
+  disabled?: boolean;
   onClick: () => void;
   onDragStart: (event: DragEvent<HTMLButtonElement>) => void;
   onDragOver: (event: DragEvent<HTMLElement>) => void;
@@ -851,17 +897,20 @@ function TileView({
     <button
       type="button"
       className={classes}
-      draggable
+      draggable={!disabled}
       onClick={(event) => {
         event.stopPropagation();
-        onClick();
+        if (!disabled) onClick();
       }}
-      onDragStart={onDragStart}
+      onDragStart={(e) => {
+        if (!disabled) onDragStart(e);
+      }}
       onDragOver={onDragOver}
       onDrop={(event) => {
         event.stopPropagation();
-        onDrop(event);
+        if (!disabled) onDrop(event);
       }}
+      style={disabled ? { opacity: 0.8, cursor: 'not-allowed' } : undefined}
     >
       {tileLabel(tile)}
     </button>
